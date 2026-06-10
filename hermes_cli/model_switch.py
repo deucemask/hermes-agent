@@ -277,32 +277,38 @@ class ModelSwitchResult:
     capabilities: Optional[ModelCapabilities] = None
     model_info: Optional[ModelInfo] = None
     is_global: bool = False
+    context_length: Optional[int] = None
 # ---------------------------------------------------------------------------
 # Flag parsing
 # ---------------------------------------------------------------------------
 
-def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool]:
-    """Parse --provider, --global, and --refresh flags from /model command args.
+def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, Optional[int]]:
+    """Parse /model command flags.
 
-    Returns (model_input, explicit_provider, is_global, force_refresh).
+    Returns (model_input, explicit_provider, is_global, force_refresh, context_length).
+
+    ``context_length`` is ``None`` when omitted. It is ``-1`` when the flag is
+    present but malformed, so ``switch_model()`` can return a normal user-facing
+    error instead of letting the bad value become part of the model name.
 
     Examples::
 
-        "sonnet"                         -> ("sonnet", "", False, False)
-        "sonnet --global"                -> ("sonnet", "", True, False)
-        "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False, False)
-        "--provider my-ollama"           -> ("", "my-ollama", False, False)
-        "--refresh"                      -> ("", "", False, True)
-        "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True, False)
+        "sonnet"                         -> ("sonnet", "", False, False, None)
+        "sonnet --global"                -> ("sonnet", "", True, False, None)
+        "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False, False, None)
+        "--provider my-ollama"           -> ("", "my-ollama", False, False, None)
+        "--refresh"                      -> ("", "", False, True, None)
+        "sonnet --context_length 262144" -> ("sonnet", "", False, False, 262144)
     """
     is_global = False
     explicit_provider = ""
     force_refresh = False
+    context_length: Optional[int] = None
 
     # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
     # A single Unicode dash before a flag keyword becomes "--"
     import re as _re
-    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|refresh)', r'--\1', raw_args)
+    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|refresh|context[-_]length)', r'--\1', raw_args)
 
     # Extract --global
     if "--global" in raw_args:
@@ -314,7 +320,7 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool]:
         force_refresh = True
         raw_args = raw_args.replace("--refresh", "").strip()
 
-    # Extract --provider <name>
+    # Extract --provider <name> and --context_length/--context-length <tokens>
     parts = raw_args.split()
     i = 0
     filtered: list[str] = []
@@ -322,12 +328,23 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool]:
         if parts[i] == "--provider" and i + 1 < len(parts):
             explicit_provider = parts[i + 1]
             i += 2
+        elif parts[i] in {"--context_length", "--context-length"}:
+            if i + 1 >= len(parts):
+                context_length = -1
+                i += 1
+                continue
+            raw_ctx = parts[i + 1].replace(",", "").replace("_", "")
+            try:
+                context_length = int(raw_ctx)
+            except (TypeError, ValueError):
+                context_length = -1
+            i += 2
         else:
             filtered.append(parts[i])
             i += 1
 
     model_input = " ".join(filtered).strip()
-    return (model_input, explicit_provider, is_global, force_refresh)
+    return (model_input, explicit_provider, is_global, force_refresh, context_length)
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +633,7 @@ def switch_model(
     explicit_provider: str = "",
     user_providers: dict = None,
     custom_providers: list | None = None,
+    context_length: Optional[int] = None,
 ) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
@@ -650,6 +668,9 @@ def switch_model(
         explicit_provider: From --provider flag (empty = no explicit provider).
         user_providers: The ``providers:`` dict from config.yaml (for user endpoints).
         custom_providers: The ``custom_providers:`` list from config.yaml.
+        context_length: Optional explicit context window from /model
+            --context_length. When omitted, the live agent clears any previous
+            per-session override and re-detects the new model's context window.
 
     Returns:
         ModelSwitchResult with all information the caller needs.
@@ -665,6 +686,13 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+
+    if context_length is not None and context_length <= 0:
+        return ModelSwitchResult(
+            success=False,
+            is_global=is_global,
+            error_message="--context_length must be a positive integer (for example: 262144).",
+        )
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -1110,6 +1138,7 @@ def switch_model(
         capabilities=capabilities,
         model_info=model_info,
         is_global=is_global,
+        context_length=context_length,
     )
 
 

@@ -878,6 +878,7 @@ class GatewaySlashCommandsMixin:
         Supports:
           /model                              — interactive picker (Telegram/Discord) or text list
           /model <name>                       — switch for this session only
+          /model <name> --context_length <n>  — switch with an explicit context window
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
@@ -893,8 +894,13 @@ class GatewaySlashCommandsMixin:
 
         raw_args = event.get_command_args().strip()
 
-        # Parse --provider, --global, and --refresh flags
-        model_input, explicit_provider, persist_global, force_refresh = parse_model_flags(raw_args)
+        # Parse --provider, --global, --refresh, and --context_length flags
+        model_input, explicit_provider, persist_global, force_refresh, context_length = parse_model_flags(raw_args)
+        if context_length is not None and context_length <= 0:
+            return t(
+                "gateway.model.error_prefix",
+                error="--context_length must be a positive integer (for example: 262144).",
+            )
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
@@ -1141,6 +1147,7 @@ class GatewaySlashCommandsMixin:
             explicit_provider=explicit_provider,
             user_providers=user_provs,
             custom_providers=custom_provs,
+            context_length=context_length,
         )
 
         if not result.success:
@@ -1162,6 +1169,7 @@ class GatewaySlashCommandsMixin:
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
+                    context_length=getattr(result, "context_length", None),
                 )
             except Exception as exc:
                 logger.warning("In-place model switch failed for cached agent: %s", exc)
@@ -1197,6 +1205,7 @@ class GatewaySlashCommandsMixin:
             "api_key": result.api_key,
             "base_url": result.base_url,
             "api_mode": result.api_mode,
+            "context_length": getattr(result, "context_length", None),
         }
 
         # Evict cached agent so the next turn creates a fresh agent from the
@@ -1228,6 +1237,10 @@ class GatewaySlashCommandsMixin:
                     cfg["model"] = model_cfg
                 model_cfg["default"] = result.new_model
                 model_cfg["provider"] = result.target_provider
+                if getattr(result, "context_length", None) is not None:
+                    model_cfg["context_length"] = getattr(result, "context_length", None)  # type: ignore[assignment]
+                else:
+                    model_cfg.pop("context_length", None)
                 if result.base_url:
                     model_cfg["base_url"] = result.base_url
                 from hermes_cli.config import save_config
@@ -1244,16 +1257,17 @@ class GatewaySlashCommandsMixin:
         # Copilot, and Nous-enforced caps win over the raw models.dev entry.
         mi = result.model_info
         from hermes_cli.model_switch import resolve_display_context_length
-        _sw2_config_ctx = None
-        try:
-            _sw2_cfg = _load_gateway_config()
-            _sw2_model_cfg = _sw2_cfg.get("model", {})
-            if isinstance(_sw2_model_cfg, dict):
-                _sw2_raw = _sw2_model_cfg.get("context_length")
-                if _sw2_raw is not None:
-                    _sw2_config_ctx = int(_sw2_raw)
-        except Exception:
-            pass
+        _sw2_config_ctx = getattr(result, "context_length", None)
+        if _sw2_config_ctx is None:
+            try:
+                _sw2_cfg = _load_gateway_config()
+                _sw2_model_cfg = _sw2_cfg.get("model", {})
+                if isinstance(_sw2_model_cfg, dict):
+                    _sw2_raw = _sw2_model_cfg.get("context_length")
+                    if _sw2_raw is not None:
+                        _sw2_config_ctx = int(_sw2_raw)
+            except Exception:
+                pass
         ctx = resolve_display_context_length(
             result.new_model,
             result.target_provider,

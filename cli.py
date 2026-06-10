@@ -3074,6 +3074,27 @@ def save_config_value(key_path: str, value: any) -> bool:
         return False
 
 
+def delete_config_value(key_path: str) -> bool:
+    """Delete a value from the active config file at the specified key path."""
+    user_config_path = _hermes_home / 'config.yaml'
+    project_config_path = Path(__file__).parent / 'cli-config.yaml'
+    config_path = user_config_path if user_config_path.exists() else project_config_path
+
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        from utils import atomic_roundtrip_yaml_delete
+        atomic_roundtrip_yaml_delete(config_path, key_path)
+
+        try:
+            os.chmod(config_path, 0o600)
+        except (OSError, NotImplementedError):
+            pass
+
+        return True
+    except Exception as e:
+        logger.error("Failed to delete config value: %s", e)
+        return False
 
 
 # ============================================================================
@@ -6525,6 +6546,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
+                    context_length=getattr(result, "context_length", None),
                 )
             except Exception as exc:
                 _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
@@ -6551,7 +6573,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 base_url=result.base_url or self.base_url or "",
                 api_key=result.api_key or self.api_key or "",
                 model_info=mi,
-                config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
+                config_context_length=getattr(result, "context_length", None) if getattr(result, "context_length", None) is not None else (getattr(self.agent, "_config_context_length", None) if self.agent else None),
             )
             if ctx:
                 _cprint(f"    Context: {ctx:,} tokens")
@@ -6574,6 +6596,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             _cprint(f"    ⚠ {result.warning_message}")
         if persist_global:
             save_config_value("model.default", result.new_model)
+            if getattr(result, "context_length", None) is not None:
+                save_config_value("model.context_length", getattr(result, "context_length", None))
+            else:
+                delete_config_value("model.context_length")
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
             _cprint("    Saved to config.yaml (--global)")
@@ -6649,6 +6675,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         Supports:
           /model                              — show current model + usage hints
           /model <name>                       — switch for this session only
+          /model <name> --context_length <n>  — switch with an explicit context window
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
@@ -6660,8 +6687,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         parts = cmd_original.split(None, 1)  # split off '/model'
         raw_args = parts[1].strip() if len(parts) > 1 else ""
 
-        # Parse --provider, --global, and --refresh flags
-        model_input, explicit_provider, persist_global, force_refresh = parse_model_flags(raw_args)
+        # Parse --provider, --global, --refresh, and --context_length flags
+        model_input, explicit_provider, persist_global, force_refresh, context_length = parse_model_flags(raw_args)
+        if context_length is not None and context_length <= 0:
+            _cprint("  ✗ --context_length must be a positive integer (for example: 262144).")
+            return
 
         # --refresh: wipe the on-disk picker cache before building the
         # provider list. Forces a live re-fetch of every authed provider's
@@ -6734,6 +6764,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             explicit_provider=explicit_provider,
             user_providers=user_provs,
             custom_providers=custom_provs,
+            context_length=context_length,
         )
 
         if not result.success:
@@ -6768,6 +6799,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
+                    context_length=getattr(result, "context_length", None),
                 )
             except Exception as exc:
                 _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
@@ -6797,7 +6829,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             base_url=result.base_url or self.base_url or "",
             api_key=result.api_key or self.api_key or "",
             model_info=mi,
-            config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
+            config_context_length=getattr(result, "context_length", None) if getattr(result, "context_length", None) is not None else (getattr(self.agent, "_config_context_length", None) if self.agent else None),
         )
         if ctx:
             _cprint(f"    Context: {ctx:,} tokens")
@@ -6823,6 +6855,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Persistence
         if persist_global:
             save_config_value("model.default", result.new_model)
+            if getattr(result, "context_length", None) is not None:
+                save_config_value("model.context_length", getattr(result, "context_length", None))
+            else:
+                delete_config_value("model.context_length")
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
             _cprint("    Saved to config.yaml (--global)")

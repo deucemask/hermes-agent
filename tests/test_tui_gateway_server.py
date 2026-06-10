@@ -2493,6 +2493,35 @@ def test_config_set_model_global_persists(monkeypatch):
     assert saved["model"]["base_url"] == "https://api.anthropic.com"
 
 
+def test_persist_model_switch_clears_stale_context_length(monkeypatch):
+    result = types.SimpleNamespace(
+        new_model="anthropic/claude-sonnet-4.6",
+        target_provider="anthropic",
+        base_url="https://api.anthropic.com",
+        context_length=None,
+    )
+    saved = {}
+
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "model": {
+                "default": "old/model",
+                "provider": "openrouter",
+                "context_length": 262_144,
+            }
+        },
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+
+    server._persist_model_switch(result)
+
+    assert saved["model"]["default"] == "anthropic/claude-sonnet-4.6"
+    assert saved["model"]["provider"] == "anthropic"
+    assert "context_length" not in saved["model"]
+
+
 def test_config_set_model_does_not_leak_inference_provider_env(monkeypatch):
     """A /model switch must NOT mutate process-global env vars. The desktop /
     dashboard tui_gateway backend hosts every same-profile session in one

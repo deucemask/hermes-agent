@@ -1351,7 +1351,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     return client
 
 
-def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mode=''):
+def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mode='', context_length=None):
     """Switch the model/provider in-place for a live agent.
 
     Called by the /model command handlers (CLI and gateway) after
@@ -1420,10 +1420,9 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     _snapshot["_client_kwargs"] = dict(getattr(agent, "_client_kwargs", {}) or {})
 
     try:
-        # Clear the per-config context_length override so the new model's
-        # actual context window is resolved via get_model_context_length()
-        # instead of inheriting the stale value from the previous model.
-        agent._config_context_length = None
+        # Clear stale per-session context_length overrides unless the /model
+        # command supplied a fresh --context_length value for this switch.
+        agent._config_context_length = context_length
 
         # ── Swap core runtime fields ──
         agent.model = new_model

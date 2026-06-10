@@ -59,6 +59,26 @@ class TestSaveConfigValueAtomic:
         result = yaml.safe_load(config_env.read_text())
         assert result["display"]["skin"] == "ares"
 
+    def test_delete_config_value_removes_nested_key(self, config_env):
+        """Deleting a key should remove stale config without clobbering siblings."""
+        config_env.write_text(yaml.dump({
+            "model": {
+                "default": "test-model",
+                "provider": "openrouter",
+                "context_length": 262144,
+            },
+            "display": {"skin": "default"},
+        }))
+
+        from cli import delete_config_value
+        assert delete_config_value("model.context_length") is True
+
+        result = yaml.safe_load(config_env.read_text())
+        assert "context_length" not in result["model"]
+        assert result["model"]["default"] == "test-model"
+        assert result["model"]["provider"] == "openrouter"
+        assert result["display"]["skin"] == "default"
+
     def test_preserves_env_ref_templates_in_unrelated_fields(self, config_env):
         """The /model --global persistence path must not inline env-backed secrets."""
         config_env.write_text(yaml.dump({

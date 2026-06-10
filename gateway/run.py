@@ -1914,7 +1914,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _restart_via_service: bool = False
     _restart_command_source: Optional[SessionSource] = None
     _stop_task: Optional[asyncio.Task] = None
-    _session_model_overrides: Dict[str, Dict[str, str]] = {}
+    _session_model_overrides: Dict[str, Dict[str, Any]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
@@ -2020,7 +2020,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
-        self._session_model_overrides: Dict[str, Dict[str, str]] = {}
+        self._session_model_overrides: Dict[str, Dict[str, Any]] = {}
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -2719,6 +2719,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
                 "max_tokens": override.get("max_tokens"),
+                "_context_length": override.get("context_length"),
             }
             if override_runtime.get("api_key"):
                 logger.debug(
@@ -2818,9 +2819,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "credential_pool": runtime_kwargs.get("credential_pool"),
             "max_tokens": runtime_kwargs.get("max_tokens"),
         }
+        context_length = runtime_kwargs.get("_context_length")
         route = {
             "model": model,
             "runtime": runtime,
+            "context_length": context_length,
             "signature": (
                 model,
                 runtime["provider"],
@@ -2828,6 +2831,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                context_length,
             ),
         }
 
@@ -2842,6 +2846,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             overrides = None
         route["request_overrides"] = overrides or {}
         return route
+
+    @staticmethod
+    def _apply_agent_context_length(agent, context_length) -> None:
+        """Apply a session-scoped /model --context_length override to an agent."""
+        if context_length is None:
+            return
+        try:
+            ctx_len = int(context_length)
+        except (TypeError, ValueError):
+            return
+        setattr(agent, "_config_context_length", ctx_len)
+        compressor = getattr(agent, "context_compressor", None)
+        if compressor:
+            compressor.update_model(
+                model=getattr(agent, "model", ""),
+                context_length=ctx_len,
+                base_url=getattr(agent, "base_url", ""),
+                api_key=getattr(agent, "api_key", ""),
+                provider=getattr(agent, "provider", ""),
+                api_mode=getattr(agent, "api_mode", ""),
+            )
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
@@ -9885,6 +9910,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+                self._apply_agent_context_length(agent, turn_route.get("context_length"))
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -12070,10 +12096,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
-        for key in ("provider", "api_key", "base_url", "api_mode"):
+        for key in ("provider", "api_key", "base_url", "api_mode", "context_length"):
             val = override.get(key)
             if val is not None:
-                runtime_kwargs[key] = val
+                runtime_key = "_context_length" if key == "context_length" else key
+                runtime_kwargs[runtime_key] = val
         return model, runtime_kwargs
 
     def _is_intentional_model_switch(self, session_key: str, agent_model: str) -> bool:
@@ -13805,6 +13832,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+                self._apply_agent_context_length(agent, turn_route.get("context_length"))
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig)

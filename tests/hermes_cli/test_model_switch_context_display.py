@@ -14,12 +14,56 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from hermes_cli.model_switch import resolve_display_context_length
+from hermes_cli.model_switch import parse_model_flags, resolve_display_context_length
 
 
 class _FakeModelInfo:
     def __init__(self, ctx):
         self.context_window = ctx
+
+
+class TestParseModelFlagsContextLength:
+    def test_parses_context_length_with_underscore_flag(self):
+        assert parse_model_flags("gpt-5.5 --context_length 1_050_000") == (
+            "gpt-5.5",
+            "",
+            False,
+            False,
+            1_050_000,
+        )
+
+    def test_parses_context_length_with_hyphen_flag_and_commas(self):
+        assert parse_model_flags(
+            "sonnet --provider anthropic --context-length 200,000 --global"
+        ) == (
+            "sonnet",
+            "anthropic",
+            True,
+            False,
+            200_000,
+        )
+
+    def test_invalid_context_length_is_reported_as_malformed(self):
+        assert parse_model_flags("sonnet --context_length nope") == (
+            "sonnet",
+            "",
+            False,
+            False,
+            -1,
+        )
+
+
+class TestModelCommandContextLengthValidation:
+    def test_malformed_context_length_without_model_reports_error(self, monkeypatch):
+        import cli as cli_mod
+
+        captured: list[str] = []
+        monkeypatch.setattr(cli_mod, "_cprint", lambda s, *a, **k: captured.append(str(s)))
+
+        cli = type("_StubCLI", (), {})()
+        cli_mod.HermesCLI._handle_model_switch(cli, "/model --context_length nope")
+
+        assert any("--context_length must be a positive integer" in line for line in captured)
 
 
 class TestResolveDisplayContextLength:

@@ -322,6 +322,7 @@ def test_apply_model_switch_does_not_leak_process_env():
         base_url = "https://api.z.ai/v1"
         api_key = "sk-glm"
         api_mode = "chat_completions"
+        context_length = None
 
     class _FakeAgent:
         def __init__(self):
@@ -346,7 +347,7 @@ def test_apply_model_switch_does_not_leak_process_env():
 
     with (
         patch("hermes_cli.model_switch.parse_model_flags",
-              return_value=("glm-5.1", None, False, False)),
+              return_value=("glm-5.1", None, False, False, None)),
         patch("hermes_cli.model_switch.switch_model", return_value=_FakeResult()),
         patch("tui_gateway.server._emit"),
         patch("tui_gateway.server._restart_slash_worker"),

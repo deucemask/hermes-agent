@@ -1689,6 +1689,10 @@ def _persist_model_switch(result) -> None:
 
     model_cfg["default"] = result.new_model
     model_cfg["provider"] = result.target_provider
+    if getattr(result, "context_length", None) is not None:
+        model_cfg["context_length"] = result.context_length
+    else:
+        model_cfg.pop("context_length", None)
     if result.base_url:
         model_cfg["base_url"] = result.base_url
     else:
@@ -1700,7 +1704,9 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     from hermes_cli.model_switch import parse_model_flags, switch_model
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
-    model_input, explicit_provider, persist_global, _force_refresh = parse_model_flags(raw_input)
+    model_input, explicit_provider, persist_global, _force_refresh, context_length = parse_model_flags(raw_input)
+    if context_length is not None and context_length <= 0:
+        raise ValueError("--context_length must be a positive integer (for example: 262144).")
     if not model_input:
         raise ValueError("model value required")
 
@@ -1749,9 +1755,11 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         explicit_provider=explicit_provider,
         user_providers=user_provs,
         custom_providers=custom_provs,
+        context_length=context_length,
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
+    result_context_length = getattr(result, "context_length", None)
 
     if agent:
         agent.switch_model(
@@ -1760,6 +1768,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_key=result.api_key,
             base_url=result.base_url,
             api_mode=result.api_mode,
+            context_length=result_context_length,
         )
         _restart_slash_worker(sid, session)
         _emit("session.info", sid, _session_info(agent, session))
@@ -1784,6 +1793,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             "base_url": result.base_url,
             "api_key": result.api_key,
             "api_mode": result.api_mode,
+            "context_length": result_context_length,
         }
     if persist_global:
         _persist_model_switch(result)
@@ -2897,6 +2907,7 @@ def _make_agent(
         override_base_url = model_override.get("base_url")
         override_api_key = model_override.get("api_key")
         override_api_mode = model_override.get("api_mode")
+        override_context_length = model_override.get("context_length")
         runtime = resolve_runtime_provider(
             requested=requested_provider,
             target_model=model or None,
@@ -2911,12 +2922,13 @@ def _make_agent(
         if override_api_mode:
             runtime["api_mode"] = override_api_mode
     else:
+        override_context_length = None
         model, requested_provider = _resolve_startup_runtime()
         runtime = resolve_runtime_provider(
             requested=requested_provider,
             target_model=model or None,
         )
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -2946,6 +2958,23 @@ def _make_agent(
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
+    if override_context_length is not None:
+        try:
+            ctx_len = int(override_context_length)
+            setattr(agent, "_config_context_length", ctx_len)
+            compressor = getattr(agent, "context_compressor", None)
+            if compressor:
+                compressor.update_model(
+                    model=getattr(agent, "model", model),
+                    context_length=ctx_len,
+                    base_url=getattr(agent, "base_url", runtime.get("base_url")),
+                    api_key=getattr(agent, "api_key", ""),
+                    provider=getattr(agent, "provider", runtime.get("provider")),
+                    api_mode=getattr(agent, "api_mode", runtime.get("api_mode")),
+                )
+        except (TypeError, ValueError):
+            pass
+    return agent
 
 
 def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):

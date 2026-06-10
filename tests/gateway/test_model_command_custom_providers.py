@@ -61,3 +61,23 @@ async def test_handle_model_command_lists_saved_custom_provider(tmp_path, monkey
     assert "Local (127.0.0.1:4141)" in result
     assert "custom:local-(127.0.0.1:4141)" in result
     assert "rotator-openrouter-coding" in result
+
+
+@pytest.mark.asyncio
+async def test_handle_model_command_rejects_malformed_context_length_before_picker(tmp_path, monkeypatch):
+    import gateway.run as gateway_run
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "old", "provider": "openrouter"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+
+    result = await _make_runner()._handle_model_command(
+        _make_event("/model --context_length nope")
+    )
+
+    assert result is not None
+    assert "--context_length must be a positive integer" in result
