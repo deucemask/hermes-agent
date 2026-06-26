@@ -36,7 +36,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 
 | Command | Description |
 |---------|-------------|
-| `/new [name]` (alias: `/reset`) | Start a new session (fresh session ID + history). Optional `[name]` sets the initial session title — e.g. `/new my-experiment` opens a fresh session already titled `my-experiment` so it's easy to find later with `/resume` or `/sessions`. Append `now`, `--yes`, or `-y` to skip the confirmation modal — e.g. `/reset now`, `/new --yes my-experiment`. |
+| `/new [--toolset name[,name]] [name]` (alias: `/reset`) | Start a new session (fresh session ID + history). Optional `[name]` sets the initial session title — e.g. `/new my-experiment` opens a fresh session already titled `my-experiment` so it's easy to find later with `/resume` or `/sessions`. Add `--toolset terminal,file` to start the fresh session with an explicit, session-scoped toolset allowlist; use repeated flags (`--toolset terminal --toolset file`), `--toolsets`, or `--toolset all`/plain `/new` to return to configured defaults. Explicit allowlists do not persist to `config.yaml`, still respect `agent.disabled_toolsets`, and include configured MCP server toolsets only when named. Append `now`, `--yes`, or `-y` to skip the confirmation modal — e.g. `/reset now`, `/new --yes --toolset terminal,file my-experiment`. |
 | `/clear` | Clear screen and start a new session |
 | `/history` | Show conversation history |
 | `/save` | Save the current conversation |
@@ -200,8 +200,8 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | Command | Description |
 |---------|-------------|
 | `/start` | Platform-protocol command. Many chat platforms (Telegram, Discord, …) send `/start` automatically the first time a user opens a bot conversation. Hermes acknowledges the ping silently — no agent reply, no session burn — so first-contact handshakes don't waste a turn. You can also send it explicitly to confirm the gateway is reachable. |
-| `/new` | Start a new conversation. |
-| `/reset` | Reset conversation history. |
+| `/new [--toolset name[,name]] [name]` | Start a new conversation. Optional title text names the new session. Add `--toolset terminal,file` (or repeated `--toolset` flags / `--toolsets`) to use an explicit session-scoped toolset allowlist for subsequent messages in the new session. `/new` without `--toolset`, or `/new --toolset all`, returns to configured platform defaults. The override is not persisted to config, still respects `agent.disabled_toolsets`, and configured MCP server toolsets are included only when explicitly named. |
+| `/reset [--toolset name[,name]] [name]` | Alias for `/new`; resets conversation history and supports the same session-scoped toolset override syntax. |
 | `/status` | Show session info, followed by a local **Session recap** block (recent turn counts, top tools used, files touched, latest prompt + reply). |
 | `/stop` | Kill all running background processes and interrupt the running agent. |
 | `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Use `--global` to persist the change to config.yaml. **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). |

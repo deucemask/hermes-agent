@@ -24,8 +24,8 @@ def _make_cli_stub():
 
     new_session_calls = []
 
-    def _capture_new_session(self_, title=None, silent=False):
-        new_session_calls.append({"title": title, "silent": silent})
+    def _capture_new_session(self_, title=None, silent=False, **kwargs):
+        new_session_calls.append({"title": title, "silent": silent, **kwargs})
 
     self_ = SimpleNamespace(
         _app=None,
@@ -44,6 +44,9 @@ def _make_cli_stub():
     )
     # Bind the methods we need under test.
     self_._split_destructive_skip = HermesCLI._split_destructive_skip
+    self_._parse_new_session_command_args = HermesCLI._parse_new_session_command_args.__get__(
+        self_, type(self_)
+    )
     self_._confirm_destructive_slash = HermesCLI._confirm_destructive_slash.__get__(
         self_, type(self_)
     )
@@ -90,8 +93,8 @@ def test_new_without_skip_token_still_consults_modal():
     new_session_calls = []
     modal_calls = []
 
-    def _capture_new_session(self_, title=None, silent=False):
-        new_session_calls.append({"title": title, "silent": silent})
+    def _capture_new_session(self_, title=None, silent=False, **kwargs):
+        new_session_calls.append({"title": title, "silent": silent, **kwargs})
 
     def _record_modal(**kw):
         modal_calls.append(kw)
@@ -111,6 +114,9 @@ def test_new_without_skip_token_still_consults_modal():
         _session_db=None,
     )
     self_._split_destructive_skip = HermesCLI._split_destructive_skip
+    self_._parse_new_session_command_args = HermesCLI._parse_new_session_command_args.__get__(
+        self_, type(self_)
+    )
     self_._normalize_slash_confirm_choice = HermesCLI._normalize_slash_confirm_choice.__get__(
         self_, type(self_)
     )

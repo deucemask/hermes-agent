@@ -2615,6 +2615,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
+        self._session_toolset_overrides: Dict[str, Optional[List[str]]] = {}
         # Startup restore gate: while restart-interrupted sessions are being
         # auto-resumed, real inbound messages are queued instead of competing
         # with the synthetic resume turns for the same session.  The queued
@@ -4121,6 +4122,59 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._session_reasoning_overrides.pop(session_key, None)
         else:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
+
+    def _valid_session_toolsets(self) -> set[str]:
+        from toolsets import get_all_toolsets
+
+        valid = set(get_all_toolsets().keys())
+        try:
+            cfg = _load_gateway_config()
+        except Exception:
+            cfg = {}
+        valid.update(str(name) for name in (cfg.get("mcp_servers") or {}).keys())
+        return valid
+
+    def _set_session_toolset_override(
+        self,
+        session_key: str,
+        toolsets: Optional[List[str]],
+        *,
+        explicit: bool,
+    ) -> None:
+        if not session_key or not explicit:
+            return
+        if not hasattr(self, "_session_toolset_overrides"):
+            self._session_toolset_overrides = {}
+        if toolsets:
+            self._session_toolset_overrides[session_key] = list(toolsets)
+        else:
+            self._session_toolset_overrides.pop(session_key, None)
+
+    def _clear_session_boundary_overrides(self, session_key: str) -> None:
+        """Clear transient state that must not cross a true session boundary."""
+        if not session_key:
+            return
+        self._session_model_overrides.pop(session_key, None)
+        self._set_session_reasoning_override(session_key, None)
+        pending_notes = getattr(self, "_pending_model_notes", None)
+        if isinstance(pending_notes, dict):
+            pending_notes.pop(session_key, None)
+        if hasattr(self, "_session_toolset_overrides"):
+            self._session_toolset_overrides.pop(session_key, None)
+
+    def _resolve_enabled_toolsets_for_session(
+        self,
+        user_config: dict,
+        platform_key: str,
+        session_key: str,
+    ) -> List[str]:
+        overrides = getattr(self, "_session_toolset_overrides", {}) or {}
+        override = overrides.get(session_key)
+        if override:
+            return sorted(override)
+
+        from hermes_cli.tools_config import _get_platform_tools
+        return sorted(_get_platform_tools(user_config, platform_key))
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -6458,10 +6512,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # session is still alive and a resumed turn rebuilds
                         # its agent from these overrides. Only true session
                         # finalization, /new, and /reset clear them.)
-                        self._session_model_overrides.pop(key, None)
-                        self._set_session_reasoning_override(key, None)
-                        if hasattr(self, "_pending_model_notes"):
-                            self._pending_model_notes.pop(key, None)
+                        self._clear_session_boundary_overrides(key)
                         _pending_approvals = getattr(self, "_pending_approvals", None)
                         if isinstance(_pending_approvals, dict):
                             _pending_approvals.pop(key, None)
@@ -9255,10 +9306,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # session-scoped transient state so the fresh session does not
             # inherit the previous conversation's model/reasoning overrides
             # or a queued "/model switched" note.
-            self._session_model_overrides.pop(session_key, None)
-            self._set_session_reasoning_override(session_key, None)
-            if hasattr(self, "_pending_model_notes"):
-                self._pending_model_notes.pop(session_key, None)
+            self._clear_session_boundary_overrides(session_key)
             session_entry.was_auto_reset = False
         
         # Emit session:start for new or auto-reset sessions
@@ -10214,10 +10262,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 new_entry = self.session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
-                self._session_model_overrides.pop(session_key, None)
-                self._set_session_reasoning_override(session_key, None)
-                if hasattr(self, "_pending_model_notes"):
-                    self._pending_model_notes.pop(session_key, None)
+                self._clear_session_boundary_overrides(session_key)
                 if new_entry is not None:
                     # Drop the stale reference to the bloated compressed child and
                     # re-point the Telegram topic binding at the fresh session.
@@ -14840,8 +14885,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
-        from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        enabled_toolsets = self._resolve_enabled_toolsets_for_session(
+            user_config,
+            platform_key,
+            session_key,
+        )
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 

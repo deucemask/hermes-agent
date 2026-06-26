@@ -38,6 +38,7 @@ def _make_runner():
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
+    runner._session_toolset_overrides = {}
     runner._pending_model_notes = {}
     runner._background_tasks = set()
 

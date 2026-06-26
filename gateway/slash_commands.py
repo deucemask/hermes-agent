@@ -102,6 +102,20 @@ class GatewaySlashCommandsMixin:
         
         # Get existing session key
         session_key = self._session_key_for_source(source)
+        had_toolset_override = session_key in (getattr(self, "_session_toolset_overrides", {}) or {})
+        raw_args = event.get_command_args().strip()
+        from agent.session_toolsets import parse_new_session_args
+        parsed_args = parse_new_session_args(
+            raw_args,
+            valid_toolsets=getattr(self, "_valid_session_toolsets")(),
+        )
+        if parsed_args.parse_error or parsed_args.invalid_toolsets or (parsed_args.explicit_toolset and parsed_args.toolsets == []):
+            parts = []
+            if parsed_args.parse_error:
+                parts.append(f"Invalid /new arguments: {parsed_args.parse_error}")
+            if parsed_args.invalid_toolsets:
+                parts.append(f"Unknown toolset(s): {', '.join(parsed_args.invalid_toolsets)}")
+            return EphemeralReply("\n".join(parts))
         self._invalidate_session_run_generation(session_key, reason="session_reset")
         # Evict the running-agent slot now that the generation is bumped. The
         # in-flight run's own guarded release (run_generation=old) will return
@@ -179,12 +193,9 @@ class GatewaySlashCommandsMixin:
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
 
-        # Clear any session-scoped model/reasoning overrides so the next agent
-        # picks up configured defaults instead of previous session switches.
-        self._session_model_overrides.pop(session_key, None)
-        self._set_session_reasoning_override(session_key, None)
-        if hasattr(self, "_pending_model_notes"):
-            self._pending_model_notes.pop(session_key, None)
+        # Clear session-scoped overrides so the next agent picks up the fresh
+        # session's defaults/toolset request instead of previous-session state.
+        getattr(self, "_clear_session_boundary_overrides")(session_key)
 
         # Clear session-scoped dangerous-command approvals and /yolo state.
         # /new is a conversation-boundary operation — approval state from the
@@ -235,7 +246,7 @@ class GatewaySlashCommandsMixin:
             header = self._telegram_topic_new_header(source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>
-        _title_arg = event.get_command_args().strip()
+        _title_arg = parsed_args.title or ""
         _title_note = ""
         if _title_arg and self._session_db and new_entry:
             from hermes_state import SessionDB
@@ -256,6 +267,31 @@ class GatewaySlashCommandsMixin:
                 # sanitize_title returned empty (whitespace-only / unprintable)
                 _title_note = t("gateway.reset.title_empty_untitled")
         header = header + _title_note
+
+        toolset_note = ""
+        getattr(self, "_set_session_toolset_override")(
+            session_key,
+            parsed_args.toolsets,
+            explicit=True,
+        )
+        if parsed_args.explicit_toolset or had_toolset_override:
+            if parsed_args.toolsets:
+                try:
+                    from gateway.run import _load_gateway_config
+                    agent_cfg = (_load_gateway_config().get("agent") or {})
+                except Exception:
+                    agent_cfg = {}
+                disabled = set(agent_cfg.get("disabled_toolsets") or [])
+                active = [name for name in parsed_args.toolsets if name not in disabled]
+                skipped = [name for name in parsed_args.toolsets if name in disabled]
+                if active:
+                    toolset_note += "\nToolsets: " + ", ".join(active)
+                else:
+                    toolset_note += "\nToolsets: none active"
+                if skipped:
+                    toolset_note += "\nDisabled by config: " + ", ".join(skipped)
+            else:
+                toolset_note += "\nToolsets: default"
 
         # When /new runs inside a Telegram DM topic lane, rewrite the
         # (chat_id, thread_id) → session_id binding so the next message
@@ -291,8 +327,8 @@ class GatewaySlashCommandsMixin:
             _tip_line = ""
 
         if session_info:
-            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
-        return EphemeralReply(f"{header}{_tip_line}")
+            return EphemeralReply(f"{header}{toolset_note}\n\n{session_info}{_tip_line}")
+        return EphemeralReply(f"{header}{toolset_note}{_tip_line}")
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show active profile name and home directory."""
@@ -3225,6 +3261,7 @@ class GatewaySlashCommandsMixin:
         if not new_entry:
             return t("gateway.resume.switch_failed")
         self._clear_session_boundary_security_state(session_key)
+        getattr(self, "_clear_session_boundary_overrides")(session_key)
 
         # Evict any cached agent for this session so the next message
         # rebuilds with the correct session_id end-to-end — mirrors
@@ -3389,6 +3426,7 @@ class GatewaySlashCommandsMixin:
         if not new_entry:
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)
+        getattr(self, "_clear_session_boundary_overrides")(session_key)
 
         # Evict any cached agent for this session
         self._evict_cached_agent(session_key)

@@ -861,6 +861,9 @@ def validate_toolset(*args, **kwargs):
     return _validate_toolset(*args, **kwargs)
 
 
+_NEW_SESSION_TOOLSETS_UNSET = object()
+
+
 def _sync_process_session_id(session_id: str) -> None:
     """Keep process-local session-id consumers aligned after CLI switches."""
     from gateway.session_context import set_current_session_id
@@ -3558,6 +3561,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         
         # Parse and validate toolsets
         self.enabled_toolsets = toolsets
+        self._default_enabled_toolsets = list(toolsets) if toolsets else None
+        self._session_toolset_override = None
         self.disabled_toolsets = CLI_CONFIG["agent"].get("disabled_toolsets") or []
 
         if toolsets and "all" not in toolsets and "*" not in toolsets:
@@ -6555,7 +6560,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
                 event_type,
-                session_id=self.agent.session_id if self.agent else None,
+                session_id=self.agent.session_id if self.agent else self.session_id,
                 platform=getattr(self, "platform", None) or "cli",
                 reason="new_session" if event_type == "on_session_reset" else "session_boundary",
             )
@@ -6591,7 +6596,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             )
             return False
 
-    def new_session(self, silent=False, title=None):
+    def _parse_new_session_command_args(self, raw_args: str):
+        from agent.session_toolsets import parse_new_session_args
+
+        valid = set(get_all_toolsets().keys())
+        valid.update(str(name) for name in (CLI_CONFIG.get("mcp_servers") or {}).keys())
+        return parse_new_session_args(raw_args, valid_toolsets=valid)
+
+    @staticmethod
+    def _normalize_enabled_toolsets_for_session(toolsets):
+        if not toolsets or "all" in toolsets or "*" in toolsets:
+            return None
+        return tuple(sorted(str(toolset) for toolset in toolsets))
+
+    def new_session(self, silent=False, title=None, enabled_toolsets_override=_NEW_SESSION_TOOLSETS_UNSET):
         """Start a fresh session with a new session ID and cleared agent state."""
         if self.agent and self.conversation_history:
             # Trigger memory extraction on the old session before session_id rotates.
@@ -6623,6 +6641,25 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # /resume and `hermes sessions list` (gemini-cli#27770 port).
             self._discard_session_if_empty(old_session_id)
 
+        old_effective_toolsets = self._normalize_enabled_toolsets_for_session(self.enabled_toolsets)
+        explicit_toolset_request = enabled_toolsets_override is not _NEW_SESSION_TOOLSETS_UNSET
+        if explicit_toolset_request:
+            if enabled_toolsets_override is None:
+                restored = self._default_enabled_toolsets
+                self.enabled_toolsets = list(restored) if restored else None
+                self._session_toolset_override = None
+            else:
+                self.enabled_toolsets = list(enabled_toolsets_override)
+                self._session_toolset_override = list(enabled_toolsets_override)
+        new_effective_toolsets = self._normalize_enabled_toolsets_for_session(self.enabled_toolsets)
+        rebuild_agent = self.agent is not None and old_effective_toolsets != new_effective_toolsets
+        if rebuild_agent:
+            try:
+                self.agent.close()
+            except Exception:
+                logger.debug("Could not close old agent before toolset rebuild", exc_info=True)
+            self.agent = None
+
         self.session_start = datetime.now()
         timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
         short_uuid = uuid.uuid4().hex[:6]
@@ -6647,43 +6684,47 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if hasattr(self.agent, "_invalidate_system_prompt"):
                 self.agent._invalidate_system_prompt()
 
-            if self._session_db:
-                try:
+        if self._session_db:
+            try:
+                if self.agent:
                     self.agent._session_db_created = False
-                    self._session_db.create_session(
-                        session_id=self.session_id,
-                        source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                        model=self.model,
-                        model_config={
-                            "max_iterations": self.max_turns,
-                            "reasoning_config": self.reasoning_config,
-                        },
-                    )
+                self._session_db.create_session(
+                    session_id=self.session_id,
+                    source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    model=self.model,
+                    model_config={
+                        "max_iterations": self.max_turns,
+                        "reasoning_config": self.reasoning_config,
+                    },
+                )
+                if self.agent:
                     self.agent._session_db_created = True
-                except Exception:
-                    pass
-                if title and self._session_db:
-                    from hermes_state import SessionDB
+            except Exception:
+                pass
+            if title and self._session_db:
+                from hermes_state import SessionDB
+                try:
+                    sanitized = SessionDB.sanitize_title(title)
+                except ValueError as e:
+                    _cprint(f"  Title rejected: {e}")
+                    sanitized = None
+                    title = None
+                if sanitized:
                     try:
-                        sanitized = SessionDB.sanitize_title(title)
+                        self._session_db.set_session_title(self.session_id, sanitized)
+                        self._pending_title = None
+                        title = sanitized
                     except ValueError as e:
-                        _cprint(f"  Title rejected: {e}")
-                        sanitized = None
+                        _cprint(f"  {e} — session started untitled.")
                         title = None
-                    if sanitized:
-                        try:
-                            self._session_db.set_session_title(self.session_id, sanitized)
-                            self._pending_title = None
-                            title = sanitized
-                        except ValueError as e:
-                            _cprint(f"  {e} — session started untitled.")
-                            title = None
-                        except Exception:
-                            title = None
-                    elif title is not None:
-                        # sanitize_title returned empty (whitespace-only / unprintable)
-                        _cprint("  Title is empty after cleanup — session started untitled.")
+                    except Exception:
                         title = None
+                elif title is not None:
+                    # sanitize_title returned empty (whitespace-only / unprintable)
+                    _cprint("  Title is empty after cleanup — session started untitled.")
+                    title = None
+
+        if self.agent:
             # Notify memory providers that session_id rotated to a fresh
             # conversation. reset=True signals providers to flush accumulated
             # per-session state (_session_turns, _turn_counter, _document_id).
@@ -6700,13 +6741,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     )
             except Exception:
                 pass
-            self._notify_session_boundary("on_session_reset")
+        self._notify_session_boundary("on_session_reset")
 
         if not silent:
             if title:
                 print(f"(^_^)v New session started: {title}")
             else:
                 print("(^_^)v New session started!")
+            if explicit_toolset_request:
+                if self.enabled_toolsets:
+                    print(f"Toolsets: {', '.join(self.enabled_toolsets)}")
+                else:
+                    print("Toolsets: default")
 
 
 
@@ -8045,7 +8091,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 cmd_original=cmd_original,
             ) is None:
                 return True  # confirmation cancelled — command handled, keep REPL alive
-            self.new_session(silent=True)
+            self.new_session(silent=True, enabled_toolsets_override=None)
             _clear_output_history()
             # Clear terminal screen.  Inside the TUI, Rich's console.clear()
             # goes through patch_stdout's StdoutProxy which swallows the
@@ -8171,7 +8217,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # so "/new now My Session" yields title="My Session" instead of
             # title="now My Session". See _split_destructive_skip.
             _new_args, _ = self._split_destructive_skip(cmd_original)
-            title = _new_args.strip() or None
+            parsed = self._parse_new_session_command_args(_new_args)
+            if parsed.parse_error or parsed.invalid_toolsets or (parsed.explicit_toolset and parsed.toolsets == []):
+                if parsed.parse_error:
+                    _cprint(f"  Invalid /new arguments: {parsed.parse_error}")
+                if parsed.invalid_toolsets:
+                    _cprint(f"  Unknown toolset(s): {', '.join(parsed.invalid_toolsets)}")
+                return True
+            title = parsed.title
             if self._confirm_destructive_slash(
                 "new",
                 "This starts a fresh session.\n"
@@ -8179,7 +8232,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 cmd_original=cmd_original,
             ) is None:
                 return True  # confirmation cancelled — command handled, keep REPL alive
-            self.new_session(title=title)
+            override = parsed.toolsets if parsed.explicit_toolset else None
+            self.new_session(title=title, enabled_toolsets_override=override)
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
         elif canonical == "sessions":
